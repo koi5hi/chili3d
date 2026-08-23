@@ -1,9 +1,9 @@
 // Part of the Chili3d Project, under the AGPL-3.0 License.
 // See LICENSE file in the project root for full license information.
 
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { execAsync } from "./common.mjs";
 
 /**
@@ -23,13 +23,16 @@ const packages = fs.readdirSync(path.resolve(__dirname, "../packages")).filter((
         const pkg = JSON.parse(fs.readFileSync(path.resolve(pkgRoot, "package.json"), "utf-8"));
         return !pkg.private;
     }
+    return false;
 });
 
 function updateVersions(version) {
     // 1. update root package.json
     updatePackage(path.resolve(__dirname, ".."), version);
     // 2. update all packages
-    packages.forEach((p) => updatePackage(getPkgRoot(p), version));
+    packages.forEach((p) => {
+        updatePackage(getPkgRoot(p), version);
+    });
     console.log(`Updated all packages to version ${version}`);
 }
 
@@ -38,7 +41,7 @@ function updateVersions(version) {
  * @param {string} pkg
  */
 function getPkgRoot(pkg) {
-    return path.resolve(__dirname, "../packages/" + pkg);
+    return path.resolve(__dirname, `../packages/${pkg}`);
 }
 
 /**
@@ -50,7 +53,7 @@ function updatePackage(pkgRoot, version) {
     /** @type {Package} */
     const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
     pkg.version = version;
-    fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
+    fs.writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
 }
 
 /**
@@ -78,7 +81,7 @@ async function main() {
         if (data.toString().trim() === "y") {
             updateVersions(version);
             await tag(version);
-            console.log("Released " + version);
+            console.log(`Released·${version}`);
         } else {
             console.log("Aborting...");
         }

@@ -1,27 +1,27 @@
-// Part of the Chili3d Project, under the AGPL-3.0 License.
-// See LICENSE file in the project root for full license information.
+// Part of the Chili3d Project, under the LGPL-3.0 License.
+// See LICENSE-chili-wasm.text file in the project root for full license information.
 
 #include <emscripten/bind.h>
 #include <emscripten/val.h>
 
 #include <BRepAdaptor_Curve.hxx>
-#include <BRepAlgoAPI_Defeaturing.hxx>
 #include <BRepAlgoAPI_Section.hxx>
 #include <BRepAlgoAPI_Splitter.hxx>
+#include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
-#include <BRepBuilderAPI_Sewing.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
 #include <BRepExtrema_ExtCC.hxx>
 #include <BRepGProp.hxx>
 #include <BRepGProp_Face.hxx>
 #include <BRepOffsetAPI_MakeOffset.hxx>
 #include <BRepPrim_Builder.hxx>
 #include <BRepTools.hxx>
-#include <BRepTools_ReShape.hxx>
 #include <BRepTools_WireExplorer.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <Bnd_OBB.hxx>
 #include <GCPnts_AbscissaPoint.hxx>
 #include <GProp_GProps.hxx>
 #include <GeomAbs_JoinType.hxx>
@@ -30,11 +30,10 @@
 #include <HLRAlgo_Projector.hxx>
 #include <HLRBRep_Algo.hxx>
 #include <HLRBRep_HLRToShape.hxx>
+#include <IntCurvesFace_Intersector.hxx>
 #include <ShapeAnalysis.hxx>
-#include <ShapeFix_Shape.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
-#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_CompSolid.hxx>
 #include <TopoDS_Compound.hxx>
@@ -52,15 +51,62 @@
 
 #include "shared.hpp"
 #include "utils.hpp"
+#include <BRepCheck_Analyzer.hxx>
+#include <BRepCheck_Wire.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
+#include <BRepClass_FaceClassifier.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
+#include <ShapeAnalysis_Edge.hxx>
+#include <ShapeFix_ShapeTolerance.hxx>
+#include <ShapeUpgrade_ShellSewing.hxx>
 
 using namespace emscripten;
 
 class Shape {
 public:
+    static size_t ptr(const TopoDS_Shape& shape)
+    {
+        return size_t(shape.TShape().get());
+    }
+
+    static BoundingBox boundingBox(const TopoDS_Shape& shape, bool useTriangulation)
+    {
+        Bnd_Box obx;
+        BRepBndLib::Add(shape, obx, useTriangulation);
+
+        return BoundingBox {
+            Vector3::fromPnt(obx.CornerMin()),
+            Vector3::fromPnt(obx.CornerMax())
+        };
+    }
+
+    static OrientedBoundingBox orientedBoundingBox(const TopoDS_Shape& shape, bool useTriangulation)
+    {
+        Bnd_OBB obb;
+        BRepBndLib::AddOBB(shape, obb, useTriangulation);
+
+        return OrientedBoundingBox {
+            Ax3::fromAx3(obb.Position()),
+            Vector3 { obb.XHSize(), obb.YHSize(), obb.ZHSize() }
+        };
+    }
+
     static TopoDS_Shape clone(const TopoDS_Shape& shape)
     {
         BRepBuilderAPI_Copy copy(shape);
         return copy.Shape();
+    }
+
+    static TopoDS_Shape transformed(const TopoDS_Shape& shape, const gp_Trsf& trsf)
+    {
+        BRepBuilderAPI_Transform transform(trsf);
+        transform.Perform(shape, true);
+        return transform.Shape();
+    }
+
+    static void clean(TopoDS_Shape& shape)
+    {
+        BRepTools::Clean(shape, true);
     }
 
     static bool isClosed(const TopoDS_Shape& shape)
@@ -71,9 +117,12 @@ public:
     static ShapeArray findAncestor(const TopoDS_Shape& from, const TopoDS_Shape& subShape,
         const TopAbs_ShapeEnum& ancestorType)
     {
-        TopTools_IndexedDataMapOfShapeListOfShape map;
+        NCollection_IndexedDataMap<TopoDS_Shape, NCollection_List<TopoDS_Shape>, TopTools_ShapeMapHasher> map;
         TopExp::MapShapesAndAncestors(from, subShape.ShapeType(), ancestorType, map);
         auto index = map.FindIndex(subShape);
+        if (index < 1) {
+            return ShapeArray(val::array());
+        }
         auto shapes = map.FindFromIndex(index);
 
         return ShapeArray(val::array(shapes.begin(), shapes.end()));
@@ -81,19 +130,19 @@ public:
 
     static ShapeArray findSubShapes(const TopoDS_Shape& shape, const TopAbs_ShapeEnum& shapeType)
     {
-        TopTools_IndexedMapOfShape indexShape;
+        NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> indexShape;
         TopExp::MapShapes(shape, shapeType, indexShape);
 
         return ShapeArray(val::array(indexShape.cbegin(), indexShape.cend()));
     }
 
-    static ShapeArray iterShape(const TopoDS_Shape& shape)
+    static ShapeArray getDirectSubShapes(const TopoDS_Shape& shape)
     {
-        val new_array = val::array();
+        val subShapes = val::array();
         for (TopoDS_Iterator iter(shape); iter.More(); iter.Next()) {
-            new_array.call<void>("push", iter.Value());
+            subShapes.call<void>("push", iter.Value());
         }
-        return ShapeArray(new_array);
+        return ShapeArray(subShapes);
     }
 
     static TopoDS_Shape sectionSS(const TopoDS_Shape& shape, const TopoDS_Shape& otherShape)
@@ -109,11 +158,12 @@ public:
         return section.Shape();
     }
 
-    static TopoDS_Shape splitShapes(const ShapeArray& arguments, const ShapeArray& tools)
+    static TopoDS_Shape splitShapes(const ShapeArray& arguments, const ShapeArray& tools, double tolerance)
     {
-        TopTools_ListOfShape argumentsList = shapeArrayToListOfShape(arguments);
-        TopTools_ListOfShape toolsList = shapeArrayToListOfShape(tools);
+        NCollection_List<TopoDS_Shape> argumentsList = shapeArrayToListOfShape(arguments);
+        NCollection_List<TopoDS_Shape> toolsList = shapeArrayToListOfShape(tools);
         BRepAlgoAPI_Splitter splitter;
+        splitter.SetFuzzyValue(tolerance);
         splitter.SetToFillHistory(false);
         splitter.SetArguments(argumentsList);
         splitter.SetTools(toolsList);
@@ -123,31 +173,10 @@ public:
         return splitter.Shape();
     }
 
-    static TopoDS_Shape removeFeature(const TopoDS_Shape& shape, const ShapeArray& faces)
+    static double extremaDistance(const TopoDS_Shape& shape, const TopoDS_Shape& otherShape)
     {
-        std::vector<TopoDS_Shape> facesVector = vecFromJSArray<TopoDS_Shape>(faces);
-        BRepAlgoAPI_Defeaturing defea;
-        defea.SetShape(shape);
-        for (auto& face : facesVector) {
-            defea.AddFaceToRemove(face);
-        }
-        defea.SetRunParallel(true);
-        defea.Build();
-        return defea.Shape();
-    }
-
-    static TopoDS_Compound shapeWires(const TopoDS_Shape& shape)
-    {
-        BRep_Builder builder;
-        TopoDS_Compound compound;
-        builder.MakeCompound(compound);
-
-        TopExp_Explorer explorer;
-        for (explorer.Init(shape, TopAbs_WIRE); explorer.More(); explorer.Next()) {
-            builder.Add(compound, TopoDS::Wire(explorer.Current()));
-        }
-
-        return compound;
+        BRepExtrema_DistShapeShape extrema(shape, otherShape);
+        return extrema.Value();
     }
 
     static size_t countShape(const TopoDS_Shape& shape, TopAbs_ShapeEnum shapeType)
@@ -160,80 +189,164 @@ public:
         return size;
     }
 
-    static bool hasOnlyOneSub(const TopoDS_Shape& shape, TopAbs_ShapeEnum shapeType)
+    static TopoDS_Shape shellSewing(const TopoDS_Shape& shape, double tolerance)
     {
-        size_t size = 0;
-        TopExp_Explorer explorer;
-        for (explorer.Init(shape, shapeType); explorer.More(); explorer.Next()) {
-            size += 1;
-            if (size > 1) {
-                return false;
-            }
+        ShapeUpgrade_ShellSewing sewing;
+        return sewing.ApplySewing(shape, tolerance);
+    }
+
+    static bool check(const TopoDS_Shape& shape)
+    {
+        BRepCheck_Analyzer analyzer(shape);
+        return analyzer.IsValid();
+    }
+
+    static const char* checkStatusName(BRepCheck_Status status)
+    {
+        switch (status) {
+        case BRepCheck_NoError:
+            return "No Error";
+        case BRepCheck_InvalidPointOnCurve:
+            return "Invalid Point On Curve";
+        case BRepCheck_InvalidPointOnCurveOnSurface:
+            return "Invalid Point On Curve On Surface";
+        case BRepCheck_InvalidPointOnSurface:
+            return "Invalid Point On Surface";
+        case BRepCheck_No3DCurve:
+            return "No 3D Curve";
+        case BRepCheck_Multiple3DCurve:
+            return "Multiple 3D Curve";
+        case BRepCheck_Invalid3DCurve:
+            return "Invalid 3D Curve";
+        case BRepCheck_NoCurveOnSurface:
+            return "No Curve On Surface";
+        case BRepCheck_InvalidCurveOnSurface:
+            return "Invalid Curve On Surface";
+        case BRepCheck_InvalidCurveOnClosedSurface:
+            return "Invalid Curve On Closed Surface";
+        case BRepCheck_InvalidSameRangeFlag:
+            return "Invalid Same Range Flag";
+        case BRepCheck_InvalidSameParameterFlag:
+            return "Invalid Same Parameter Flag";
+        case BRepCheck_InvalidDegeneratedFlag:
+            return "Invalid Degenerated Flag";
+        case BRepCheck_FreeEdge:
+            return "Free Edge";
+        case BRepCheck_InvalidMultiConnexity:
+            return "Invalid Multi Connexity";
+        case BRepCheck_InvalidRange:
+            return "Invalid Range";
+        case BRepCheck_EmptyWire:
+            return "Empty Wire";
+        case BRepCheck_RedundantEdge:
+            return "Redundant Edge";
+        case BRepCheck_SelfIntersectingWire:
+            return "Self Intersecting Wire";
+        case BRepCheck_NoSurface:
+            return "No Surface";
+        case BRepCheck_InvalidWire:
+            return "Invalid Wire";
+        case BRepCheck_RedundantWire:
+            return "Redundant Wire";
+        case BRepCheck_IntersectingWires:
+            return "Intersecting Wires";
+        case BRepCheck_InvalidImbricationOfWires:
+            return "Invalid Imbrication Of Wires";
+        case BRepCheck_EmptyShell:
+            return "Empty Shell";
+        case BRepCheck_RedundantFace:
+            return "Redundant Face";
+        case BRepCheck_InvalidImbricationOfShells:
+            return "Invalid Imbrication Of Shells";
+        case BRepCheck_UnorientableShape:
+            return "Unorientable Shape";
+        case BRepCheck_NotClosed:
+            return "Not Closed";
+        case BRepCheck_NotConnected:
+            return "Not Connected";
+        case BRepCheck_SubshapeNotInShape:
+            return "Subshape Not In Shape";
+        case BRepCheck_BadOrientation:
+            return "Bad Orientation";
+        case BRepCheck_BadOrientationOfSubshape:
+            return "Bad Orientation Of Subshape";
+        case BRepCheck_InvalidPolygonOnTriangulation:
+            return "Invalid Polygon On Triangulation";
+        case BRepCheck_InvalidToleranceValue:
+            return "Invalid Tolerance Value";
+        case BRepCheck_EnclosedRegion:
+            return "Enclosed Region";
+        case BRepCheck_CheckFail:
+            return "Check Fail";
+        default:
+            return "Unknown";
         }
-        return size == 1;
     }
 
-    static TopoDS_Shape removeSubShape(TopoDS_Shape& shape, const ShapeArray& subShapes)
+    static std::string joinStatusNames(const NCollection_List<BRepCheck_Status>& statusList)
     {
-        std::vector<TopoDS_Shape> subShapesVector = vecFromJSArray<TopoDS_Shape>(subShapes);
-
-        auto source = hasOnlyOneSub(shape, TopAbs_FACE) ? shapeWires(shape) : shape;
-        TopTools_IndexedDataMapOfShapeListOfShape mapEF;
-        TopExp::MapShapesAndAncestors(source, TopAbs_EDGE, TopAbs_FACE, mapEF);
-        BRepTools_ReShape reShape;
-        for (auto& subShape : subShapesVector) {
-            reShape.Remove(subShape);
-
-            TopTools_ListOfShape faces;
-            if (mapEF.FindFromKey(subShape, faces)) {
-                for (auto& face : faces) {
-                    reShape.Remove(face);
-                }
+        std::string result;
+        for (auto it = statusList.begin(); it != statusList.end(); ++it) {
+            if (!result.empty()) {
+                result += ", ";
             }
+            result += checkStatusName(*it);
+        }
+        return result;
+    }
+
+    static std::string collectFaceStatus(const BRepCheck_Analyzer& analyzer, const TopoDS_Shape& face)
+    {
+        std::string statuses;
+        const auto& faceResult = analyzer.Result(face);
+        if (!faceResult.IsNull()) {
+            statuses = joinStatusNames(faceResult->Status());
+        }
+        return statuses;
+    }
+
+    static std::vector<FaceCheckResult> checkFaces(const TopoDS_Shape& shape)
+    {
+        BRepCheck_Analyzer analyzer(shape);
+
+        NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> faceMap;
+        TopExp::MapShapes(shape, TopAbs_FACE, faceMap);
+
+        std::vector<FaceCheckResult> results;
+        for (int i = 1; i <= faceMap.Extent(); i++) {
+            const TopoDS_Shape& face = faceMap.FindKey(i);
+
+            FaceCheckResult result;
+            result.index = i - 1;
+            result.isValid = analyzer.IsValid(face);
+            result.status = collectFaceStatus(analyzer, face);
+            results.push_back(result);
         }
 
-        ShapeFix_Shape fixer(reShape.Apply(source));
-        fixer.Perform();
-
-        return fixer.Shape();
+        return results;
     }
 
-    static TopoDS_Shape replaceSubShape(const TopoDS_Shape& shape, const TopoDS_Shape& subShape,
-        const TopoDS_Shape& newShape)
-    {
-        BRepTools_ReShape reShape;
-        reShape.Replace(subShape, newShape);
-
-        ShapeFix_Shape fixer(reShape.Apply(shape));
-        fixer.Perform();
-
-        return fixer.Shape();
-    }
-
-    static TopoDS_Shape sewing(const TopoDS_Shape& shape1, const TopoDS_Shape& shape2)
-    {
-        BRepBuilderAPI_Sewing sewing;
-        sewing.Add(shape1);
-        sewing.Add(shape2);
-
-        sewing.Perform();
-        return sewing.SewedShape();
-    }
-
-    static TopoDS_Shape hlr(const TopoDS_Shape& shape, const gp_Pnt& point, const gp_Dir& direction, const gp_Dir& xDirection)
+    static TopoDS_Shape
+    hlr(const TopoDS_Shape& shape, const gp_Pnt& point, const gp_Dir& direction, const gp_Dir& xDirection)
     {
         gp_Ax3 ax3(point, direction, xDirection);
         gp_Trsf trsf;
         trsf.SetTransformation(ax3);
 
         HLRAlgo_Projector projector(trsf, false, false);
-        Handle_HLRBRep_Algo algo = new HLRBRep_Algo();
+        Handle(HLRBRep_Algo) algo = new HLRBRep_Algo();
         algo->Add(shape);
         algo->Projector(projector);
         algo->Update();
 
         HLRBRep_HLRToShape hlrToShape(algo);
         return hlrToShape.VCompound();
+    }
+
+    static void setTolerance(const TopoDS_Shape& shape, double tolerance)
+    {
+        ShapeFix_ShapeTolerance aFixTol;
+        aFixTol.SetTolerance(shape, tolerance);
     }
 };
 
@@ -249,7 +362,7 @@ class Edge {
 public:
     static TopoDS_Edge fromCurve(const Geom_Curve* curve)
     {
-        Handle_Geom_Curve handleCurve(curve);
+        Handle(Geom_Curve) handleCurve(curve);
         BRepBuilderAPI_MakeEdge builder(handleCurve);
         return builder.Edge();
     }
@@ -261,19 +374,71 @@ public:
         return props.Mass();
     }
 
-    static Handle_Geom_TrimmedCurve curve(const TopoDS_Edge& edge)
+    static double firstParameter(const TopoDS_Edge& edge)
+    {
+        BRepAdaptor_Curve adaptor(edge);
+        return adaptor.FirstParameter();
+    }
+
+    static double lastParameter(const TopoDS_Edge& edge)
+    {
+        BRepAdaptor_Curve adaptor(edge);
+        return adaptor.LastParameter();
+    }
+
+    static Vector3 pointAt(const TopoDS_Edge& edge, double parameter)
+    {
+        BRepAdaptor_Curve adaptor(edge);
+        return Vector3::fromPnt(adaptor.Value(parameter));
+    }
+
+    static Vector3 startPoint(const TopoDS_Edge& edge)
+    {
+        ShapeAnalysis_Edge analysis;
+        return Vector3::fromPnt(BRep_Tool::Pnt(analysis.FirstVertex(edge)));
+    }
+
+    static Vector3 endPoint(const TopoDS_Edge& edge)
+    {
+        ShapeAnalysis_Edge analysis;
+        return Vector3::fromPnt(BRep_Tool::Pnt(analysis.LastVertex(edge)));
+    }
+
+    static Vector3Array ends(const TopoDS_Edge& edge)
+    {
+        ShapeAnalysis_Edge analysis;
+        std::vector<Vector3> points = {
+            Vector3::fromPnt(BRep_Tool::Pnt(analysis.FirstVertex(edge))),
+            Vector3::fromPnt(BRep_Tool::Pnt(analysis.LastVertex(edge))),
+        };
+        return Vector3Array(val::array(points));
+    }
+
+    static Handle(Geom_TrimmedCurve) curve(const TopoDS_Edge& edge)
     {
         double start(0.0), end(0.0);
         auto curve = BRep_Tool::Curve(edge, start, end);
-        Handle_Geom_TrimmedCurve trimmedCurve = new Geom_TrimmedCurve(curve, start, end);
+        Handle(Geom_TrimmedCurve) trimmedCurve = new Geom_TrimmedCurve(curve, start, end);
         return trimmedCurve;
     }
 
     static TopoDS_Edge trim(const TopoDS_Edge& edge, double start, double end)
     {
         double u1(0.0), u2(0.0);
-        auto curve = BRep_Tool::Curve(edge, u1, u2);
+        Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, u1, u2);
+        // A Geom_OffsetCurve on a trimmed basis is bounded by the basis trim range,
+        // rebase it on the untrimmed basis so trimming beyond the edge range works.
+        Handle(Geom_OffsetCurve) offsetCurve = Handle(Geom_OffsetCurve)::DownCast(curve);
+        if (!offsetCurve.IsNull()) {
+            Handle(Geom_TrimmedCurve) trimmedBasis = Handle(Geom_TrimmedCurve)::DownCast(offsetCurve->BasisCurve());
+            if (!trimmedBasis.IsNull()) {
+                curve = new Geom_OffsetCurve(trimmedBasis->BasisCurve(), offsetCurve->Offset(), offsetCurve->Direction());
+            }
+        }
         BRepBuilderAPI_MakeEdge builder(curve, start, end);
+        if (!builder.IsDone()) {
+            return TopoDS_Edge();
+        }
         return builder.Edge();
     }
 
@@ -281,8 +446,8 @@ public:
     {
         double start(0.0), end(0.0);
         auto curve = BRep_Tool::Curve(edge, start, end);
-        Handle_Geom_TrimmedCurve trimmedCurve = new Geom_TrimmedCurve(curve, start, end);
-        Handle_Geom_OffsetCurve offsetCurve = new Geom_OffsetCurve(trimmedCurve, offset, dir);
+        Handle(Geom_TrimmedCurve) trimmedCurve = new Geom_TrimmedCurve(curve, start, end);
+        Handle(Geom_OffsetCurve) offsetCurve = new Geom_OffsetCurve(trimmedCurve, offset, dir);
         BRepBuilderAPI_MakeEdge builder(offsetCurve);
         return builder.Edge();
     }
@@ -290,6 +455,18 @@ public:
     static PointAndParameterArray intersect(const TopoDS_Edge& edge, const TopoDS_Edge& otherEdge)
     {
         std::vector<PointAndParameter> points;
+        if (edge.IsNull() || otherEdge.IsNull() || BRep_Tool::Degenerated(edge)
+            || BRep_Tool::Degenerated(otherEdge)) {
+            return PointAndParameterArray(val::array(points));
+        }
+
+        double start1(0.0), end1(0.0), start2(0.0), end2(0.0);
+        Handle(Geom_Curve) curve1 = BRep_Tool::Curve(edge, start1, end1);
+        Handle(Geom_Curve) curve2 = BRep_Tool::Curve(otherEdge, start2, end2);
+        if (curve1.IsNull() || curve2.IsNull()) {
+            return PointAndParameterArray(val::array(points));
+        }
+
         BRepExtrema_ExtCC cc(edge, otherEdge);
         if (cc.IsDone() && cc.NbExt() > 0 && !cc.IsParallel()) {
             for (int i = 1; i <= cc.NbExt(); i++) {
@@ -366,6 +543,35 @@ public:
         return domain;
     }
 
+    static bool containsPoint(const TopoDS_Face& face, const Vector3& point, bool containsEdge, double tolerance)
+    {
+        gp_Pnt pnt(point.x, point.y, point.z);
+
+        auto aPuv = pointToFaceUV(face, pnt, tolerance);
+        if (!aPuv.has_value()) {
+            return false;
+        }
+
+        BRepClass_FaceClassifier classifier(face, aPuv.value(), tolerance);
+        auto state = classifier.State();
+        if (containsEdge && state == TopAbs_ON) {
+            return true;
+        }
+        return state == TopAbs_IN;
+    }
+
+    static std::optional<Vector3> intersectLine(const TopoDS_Face& face, const Vector3& point, const Vector3& direction, double tolerance)
+    {
+        gp_Lin line(gp_Pnt(point.x, point.y, point.z), gp_Dir(direction.x, direction.y, direction.z));
+
+        IntCurvesFace_Intersector anIntersector(face, tolerance);
+        anIntersector.Perform(line, -1e12, 1e12);
+        if (anIntersector.IsDone() && anIntersector.NbPnt() > 0) {
+            return Vector3::fromPnt(anIntersector.Pnt(1));
+        }
+        return std::nullopt;
+    }
+
     static void normal(const TopoDS_Face& face, double u, double v, gp_Pnt& point, gp_Vec& normal)
     {
         BRepGProp_Face gpProp(face);
@@ -387,7 +593,7 @@ public:
         return BRepTools::OuterWire(face);
     }
 
-    static Handle_Geom_Surface surface(const TopoDS_Face& face)
+    static Handle(Geom_Surface) surface(const TopoDS_Face& face)
     {
         return BRep_Tool::Surface(face);
     }
@@ -401,24 +607,46 @@ public:
         BRepGProp::VolumeProperties(solid, props);
         return props.Mass();
     }
+
+    static bool containsPoint(const TopoDS_Shape& shape, const Vector3& point, bool containsSurface, double tolerance)
+    {
+        gp_Pnt pnt(point.x, point.y, point.z);
+        BRepClass3d_SolidClassifier classifier(shape, pnt, tolerance);
+        TopAbs_State state = classifier.State();
+        if (state == TopAbs_IN) {
+            return true;
+        } else if (state == TopAbs_OUT) {
+            return false;
+        } else if (state == TopAbs_ON && containsSurface) {
+            return true;
+        }
+
+        return false;
+    }
 };
 
 EMSCRIPTEN_BINDINGS(Shape)
 {
     class_<Shape>("Shape")
+        .class_function("ptr", &Shape::ptr)
+        .class_function("boundingBox", &Shape::boundingBox)
+        .class_function("orientedBoundingBox", &Shape::orientedBoundingBox)
+        .class_function("extremaDistance", &Shape::extremaDistance)
+        .class_function("clean", &Shape::clean)
         .class_function("clone", &Shape::clone)
+        .class_function("transformed", &Shape::transformed)
         .class_function("findAncestor", &Shape::findAncestor)
         .class_function("findSubShapes", &Shape::findSubShapes)
-        .class_function("iterShape", &Shape::iterShape)
+        .class_function("getDirectSubShapes", &Shape::getDirectSubShapes)
         .class_function("sectionSS", &Shape::sectionSS)
         .class_function("sectionSP", &Shape::sectionSP)
         .class_function("isClosed", &Shape::isClosed)
         .class_function("splitShapes", &Shape::splitShapes)
-        .class_function("removeFeature", &Shape::removeFeature)
-        .class_function("removeSubShape", &Shape::removeSubShape)
-        .class_function("replaceSubShape", &Shape::replaceSubShape)
+        .class_function("check", &Shape::check)
+        .class_function("checkFaces", &Shape::checkFaces)
         .class_function("hlr", &Shape::hlr)
-        .class_function("sewing", &Shape::sewing);
+        .class_function("shellSewing", &Shape::shellSewing)
+        .class_function("setTolerance", &Shape::setTolerance);
 
     class_<Vertex>("Vertex").class_function("point", &Vertex::point);
 
@@ -426,6 +654,12 @@ EMSCRIPTEN_BINDINGS(Shape)
         .class_function("fromCurve", &Edge::fromCurve, allow_raw_pointers())
         .class_function("curve", &Edge::curve)
         .class_function("curveLength", &Edge::curveLength)
+        .class_function("firstParameter", &Edge::firstParameter)
+        .class_function("lastParameter", &Edge::lastParameter)
+        .class_function("pointAt", &Edge::pointAt)
+        .class_function("startPoint", &Edge::startPoint)
+        .class_function("endPoint", &Edge::endPoint)
+        .class_function("ends", &Edge::ends)
         .class_function("trim", &Edge::trim)
         .class_function("intersect", &Edge::intersect)
         .class_function("offset", &Edge::offset);
@@ -441,7 +675,11 @@ EMSCRIPTEN_BINDINGS(Shape)
         .class_function("outerWire", &Face::outerWire)
         .class_function("surface", &Face::surface)
         .class_function("normal", &Face::normal)
-        .class_function("curveOnSurface", &Face::curveOnSurface);
+        .class_function("intersectLine", &Face::intersectLine)
+        .class_function("curveOnSurface", &Face::curveOnSurface)
+        .class_function("containsPoint", &Face::containsPoint);
 
-    class_<Solid>("Solid").class_function("volume", &Solid::volume);
+    class_<Solid>("Solid")
+        .class_function("volume", &Solid::volume)
+        .class_function("containsPoint", &Solid::containsPoint);
 }

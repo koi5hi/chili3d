@@ -1,8 +1,9 @@
-// Part of the Chili3d Project, under the AGPL-3.0 License.
-// See LICENSE file in the project root for full license information.
+// Part of the Chili3d Project, under the LGPL-3.0 License.
+// See LICENSE-chili-wasm.text file in the project root for full license information.
 
 #include <emscripten/bind.h>
 
+#include <BRepOffset_Mode.hxx>
 #include <BRep_Tool.hxx>
 #include <GeomAbs_JoinType.hxx>
 #include <GeomAbs_Shape.hxx>
@@ -56,6 +57,12 @@ using namespace emscripten;
 EMSCRIPTEN_BINDINGS(opencascade)
 {
     register_optional<TopoDS_Shape>();
+    register_optional<TopoDS_Wire>();
+    register_optional<TopoDS_Face>();
+    register_optional<TopoDS_Solid>();
+    register_optional<TopoDS_Shell>();
+    register_optional<TopoDS_Compound>();
+    register_optional<TopoDS_CompSolid>();
 
     enum_<GeomAbs_Shape>("GeomAbs_Shape")
         .value("GeomAbs_C0", GeomAbs_C0)
@@ -70,6 +77,11 @@ EMSCRIPTEN_BINDINGS(opencascade)
         .value("GeomAbs_Arc", GeomAbs_Arc)
         .value("GeomAbs_Intersection", GeomAbs_Intersection)
         .value("GeomAbs_Tangent", GeomAbs_Tangent);
+
+    enum_<BRepOffset_Mode>("BRepOffset_Mode")
+        .value("BRepOffset_Skin", BRepOffset_Skin)
+        .value("BRepOffset_Pipe", BRepOffset_Pipe)
+        .value("BRepOffset_RectoVerso", BRepOffset_RectoVerso);
 
     enum_<TopAbs_ShapeEnum>("TopAbs_ShapeEnum")
         .value("TopAbs_VERTEX", TopAbs_VERTEX)
@@ -110,7 +122,7 @@ EMSCRIPTEN_BINDINGS(opencascade)
         .function("firstParameter", &Geom_Curve::FirstParameter)
         .function("lastParameter", &Geom_Curve::LastParameter)
         .function("value", &Geom_Curve::Value)
-        .function("continutity", &Geom_Curve::Continuity);
+        .function("continuity", &Geom_Curve::Continuity);
 
     class_<Geom_Conic, base<Geom_Curve>>("Geom_Conic")
         .function("axis", &Geom_Conic::Axis)
@@ -183,8 +195,8 @@ EMSCRIPTEN_BINDINGS(opencascade)
         .function("weight", &Geom_BezierCurve::Weight)
         .function("setWeight", &Geom_BezierCurve::SetWeight)
         .function("nbPoles", &Geom_BezierCurve::NbPoles)
-        .function("getPoles", select_overload<const TColgp_Array1OfPnt&() const>(&Geom_BezierCurve::Poles))
-        .function("setPoles", select_overload<void(TColgp_Array1OfPnt&) const>(&Geom_BezierCurve::Poles))
+        .function("getPoles", select_overload<const NCollection_Array1<gp_Pnt>&() const>(&Geom_BezierCurve::Poles))
+        .function("setPoles", select_overload<void(NCollection_Array1<gp_Pnt>&) const>(&Geom_BezierCurve::Poles))
         .function("pole", &Geom_BezierCurve::Pole)
         .function("setPole", select_overload<void(int, const gp_Pnt&)>(&Geom_BezierCurve::SetPole))
         .function("setPoleWithWeight", select_overload<void(int, const gp_Pnt&, double)>(&Geom_BezierCurve::SetPole))
@@ -199,8 +211,8 @@ EMSCRIPTEN_BINDINGS(opencascade)
         .function("setKnot", select_overload<void(int, const double)>(&Geom_BSplineCurve::SetKnot))
         .function("weight", &Geom_BSplineCurve::Weight)
         .function("setWeight", &Geom_BSplineCurve::SetWeight)
-        .function("getPoles", select_overload<const TColgp_Array1OfPnt&() const>(&Geom_BSplineCurve::Poles))
-        .function("setPoles", select_overload<void(TColgp_Array1OfPnt&) const>(&Geom_BSplineCurve::Poles))
+        .function("getPoles", select_overload<const NCollection_Array1<gp_Pnt>&() const>(&Geom_BSplineCurve::Poles))
+        .function("setPoles", select_overload<void(NCollection_Array1<gp_Pnt>&) const>(&Geom_BSplineCurve::Poles))
         .function("pole", &Geom_BSplineCurve::Pole)
         .function("setPole", select_overload<void(int, const gp_Pnt&)>(&Geom_BSplineCurve::SetPole))
         .function("setPoleWithWeight", select_overload<void(int, const gp_Pnt&, double)>(&Geom_BSplineCurve::SetPole));
@@ -397,11 +409,11 @@ EMSCRIPTEN_BINDINGS(opencascade)
         .function("move", &TopoDS_Shape::Move)
         .function("moved", &TopoDS_Shape::Moved);
 
-    class_<TColgp_Array1OfPnt>("TColgp_Array1OfPnt")
+    class_<NCollection_Array1<gp_Pnt>>("TColgp_Array1OfPnt")
         .constructor<int, int>()
-        .function("value", select_overload<const gp_Pnt&(Standard_Integer) const>(&TColgp_Array1OfPnt::Value))
-        .function("setValue", select_overload<void(Standard_Integer, const gp_Pnt&)>(&TColgp_Array1OfPnt::SetValue))
-        .function("length", &TColgp_Array1OfPnt::Length);
+        .function("value", select_overload<const gp_Pnt&(int) const>(&NCollection_Array1<gp_Pnt>::Value))
+        .function("setValue", select_overload<void(int, const gp_Pnt&)>(&NCollection_Array1<gp_Pnt>::SetValue))
+        .function("length", &NCollection_Array1<gp_Pnt>::Length);
 
     class_<TopoDS_Vertex, base<TopoDS_Shape>>("TopoDS_Vertex");
     class_<TopoDS_Edge, base<TopoDS_Shape>>("TopoDS_Edge");

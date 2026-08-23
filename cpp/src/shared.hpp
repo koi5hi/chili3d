@@ -1,5 +1,5 @@
-// Part of the Chili3d Project, under the AGPL-3.0 License.
-// See LICENSE file in the project root for full license information.
+// Part of the Chili3d Project, under the LGPL-3.0 License.
+// See LICENSE-chili-wasm.text file in the project root for full license information.
 
 #pragma once
 
@@ -15,11 +15,11 @@
 #include <gp_Vec.hxx>
 
 #define STR(x) #x
-#define REGISTER_HANDLE(T)                                       \
-    class_<Handle_##T>(STR(Handle_##T))                          \
-        .constructor<const T*>()                                 \
-        .function("get", &Handle_##T::get, allow_raw_pointers()) \
-        .function("isNull", &Handle_##T::IsNull)
+#define REGISTER_HANDLE(T)                                                   \
+    class_<opencascade::handle<T>>(STR(Handle_##T))                          \
+        .constructor<const T*>()                                             \
+        .function("get", &opencascade::handle<T>::get, allow_raw_pointers()) \
+        .function("isNull", &opencascade::handle<T>::IsNull)
 
 class Math {
 public:
@@ -173,6 +173,16 @@ struct Pln {
     }
 };
 
+struct BoundingBox {
+    Vector3 min;
+    Vector3 max;
+};
+
+struct OrientedBoundingBox {
+    Ax3 center;
+    Vector3 size;
+};
+
 struct ProjectPointResult {
     Vector3 point;
     double distance;
@@ -186,6 +196,12 @@ struct ExtremaCCResult {
     Vector3 p2;
     double u1;
     double u2;
+};
+
+struct FaceCheckResult {
+    int index;
+    bool isValid;
+    std::string status;
 };
 
 EMSCRIPTEN_DECLARE_VAL_TYPE(Int8Array)

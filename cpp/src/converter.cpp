@@ -1,5 +1,5 @@
-// Part of the Chili3d Project, under the AGPL-3.0 License.
-// See LICENSE file in the project root for full license information.
+// Part of the Chili3d Project, under the LGPL-3.0 License.
+// See LICENSE-chili-wasm.text file in the project root for full license information.
 
 #include <emscripten/bind.h>
 #include <emscripten/val.h>
@@ -61,7 +61,7 @@ std::string getLabelNameNoRef(const TDF_Label& label)
         return std::string();
     }
 
-    Standard_Integer utf8NameLength = nameAttribute->Get().LengthOfCString();
+    int utf8NameLength = nameAttribute->Get().LengthOfCString();
     char* nameBuf = new char[utf8NameLength + 1];
     nameAttribute->Get().ToUTF8CString(nameBuf);
     std::string name(nameBuf, utf8NameLength);
@@ -196,7 +196,7 @@ ShapeNode initShapeNode(const TopoDS_Shape& shape, const Handle(XCAFDoc_ShapeToo
     return childShapeNode;
 }
 
-ShapeNode initGroupNode(const TopoDS_Shape& shape, const Handle_XCAFDoc_ShapeTool& shapeTool)
+ShapeNode initGroupNode(const TopoDS_Shape& shape, const Handle(XCAFDoc_ShapeTool) & shapeTool)
 {
     ShapeNode groupNode = {
         .shape = std::nullopt, .color = std::nullopt, .children = {}, .name = getShapeName(shape, shapeTool)
@@ -205,8 +205,8 @@ ShapeNode initGroupNode(const TopoDS_Shape& shape, const Handle_XCAFDoc_ShapeToo
     return groupNode;
 }
 
-ShapeNode parseShape(TopoDS_Shape& shape, const Handle_XCAFDoc_ShapeTool& shapeTool,
-    const Handle_XCAFDoc_ColorTool& colorTool)
+ShapeNode parseShape(TopoDS_Shape& shape, const Handle(XCAFDoc_ShapeTool) & shapeTool,
+    const Handle(XCAFDoc_ColorTool) & colorTool)
 {
     if (shape.ShapeType() == TopAbs_COMPOUND || shape.ShapeType() == TopAbs_COMPSOLID) {
         auto node = initGroupNode(shape, shapeTool);
@@ -286,6 +286,44 @@ private:
         dummyFile.close();
     }
 
+    // OCCT's STEP lexer cannot grow its input buffer while matching, so any single token
+    // (including a comment) longer than its 16KB buffer aborts the whole read. Strip STEP
+    // comments (/* ... */) upfront - they carry no data OCCT consumes.
+    static std::vector<uint8_t> removeStepComments(const std::vector<uint8_t>& input)
+    {
+        std::vector<uint8_t> output;
+        output.reserve(input.size());
+
+        bool inString = false;
+        for (size_t i = 0; i < input.size(); ++i) {
+            uint8_t c = input[i];
+            if (inString) {
+                output.push_back(c);
+                if (c == '\'') {
+                    // a doubled '' is an escaped quote and keeps the string open
+                    if (i + 1 < input.size() && input[i + 1] == '\'') {
+                        output.push_back(input[++i]);
+                    } else {
+                        inString = false;
+                    }
+                }
+            } else if (c == '\'') {
+                inString = true;
+                output.push_back(c);
+            } else if (c == '/' && i + 1 < input.size() && input[i + 1] == '*') {
+                // skip until the closing */ (or end of input)
+                ++i;
+                while (i + 1 < input.size() && !(input[i] == '*' && input[i + 1] == '/')) {
+                    ++i;
+                }
+                ++i;
+            } else {
+                output.push_back(c);
+            }
+        }
+        return output;
+    }
+
 public:
     static std::string convertToBrep(const TopoDS_Shape& input)
     {
@@ -305,7 +343,7 @@ public:
 
     static std::optional<ShapeNode> convertFromStep(const Uint8Array& buffer)
     {
-        std::vector<uint8_t> input = convertJSArrayToNumberVector<uint8_t>(buffer);
+        std::vector<uint8_t> input = removeStepComments(convertJSArrayToNumberVector<uint8_t>(buffer));
         VectorBuffer vectorBuffer(input);
         std::istream iss(&vectorBuffer);
 

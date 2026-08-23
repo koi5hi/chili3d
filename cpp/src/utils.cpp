@@ -1,10 +1,13 @@
-// Part of the Chili3d Project, under the AGPL-3.0 License.
-// See LICENSE file in the project root for full license information.
+// Part of the Chili3d Project, under the LGPL-3.0 License.
+// See LICENSE-chili-wasm.text file in the project root for full license information.
 
 #include "utils.hpp"
 
+#include <BRepAdaptor_Surface.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepTools.hxx>
 #include <Bnd_Box.hxx>
+#include <Extrema_ExtPS.hxx>
 #include <GeomAPI_ExtremaCurveCurve.hxx>
 #include <GeomAPI_ProjectPointOnCurve.hxx>
 
@@ -75,17 +78,17 @@ ProjectPointResult projectOrNearestCP(const Geom_Curve* curve, const gp_Pnt& pnt
     return nearestEnd(curve, pnt);
 }
 
-double boundingBoxRatio(const TopoDS_Shape& shape, double linearDeflection)
+double boundingBoxRatio(const TopoDS_Shape& shape, double linearDeflection, bool useTriangulation)
 {
     Bnd_Box boundingBox;
-    BRepBndLib::Add(shape, boundingBox, false);
+    BRepBndLib::Add(shape, boundingBox, useTriangulation);
     if (boundingBox.IsVoid()) {
         return linearDeflection;
     }
-    Standard_Real xMin, yMin, zMin, xMax, yMax, zMax;
+    double xMin, yMin, zMin, xMax, yMax, zMax;
     boundingBox.Get(xMin, yMin, zMin, xMax, yMax, zMax);
 
-    Standard_Real avgSize = ((xMax - xMin) + (yMax - yMin) + (zMax - zMin)) / 3.0;
+    double avgSize = ((xMax - xMin) + (yMax - yMin) + (zMax - zMin)) / 3.0;
     double linDeflection = avgSize * linearDeflection;
     if (linDeflection < Precision::Confusion()) {
         linDeflection = 1.0;
@@ -93,22 +96,65 @@ double boundingBoxRatio(const TopoDS_Shape& shape, double linearDeflection)
     return linDeflection;
 }
 
-TopTools_SequenceOfShape shapeArrayToSequenceOfShape(const ShapeArray& shapes)
+NCollection_Sequence<TopoDS_Shape> shapeArrayToSequenceOfShape(const ShapeArray& shapes)
 {
     std::vector<TopoDS_Shape> shapeVector = emscripten::vecFromJSArray<TopoDS_Shape>(shapes);
-    TopTools_SequenceOfShape result;
+    NCollection_Sequence<TopoDS_Shape> result;
     for (auto& s : shapeVector) {
         result.Append(s);
     }
     return result;
 }
 
-TopTools_ListOfShape shapeArrayToListOfShape(const ShapeArray& shapes)
+NCollection_List<TopoDS_Shape> shapeArrayToListOfShape(const ShapeArray& shapes)
 {
     std::vector<TopoDS_Shape> shapeVector = emscripten::vecFromJSArray<TopoDS_Shape>(shapes);
-    TopTools_ListOfShape result;
+    NCollection_List<TopoDS_Shape> result;
     for (auto& s : shapeVector) {
         result.Append(s);
     }
     return result;
+}
+
+NCollection_Map<TopoDS_Shape, TopTools_ShapeMapHasher> shapeArrayToMapOfShape(const ShapeArray& shapes)
+{
+    std::vector<TopoDS_Shape> shapeVector = emscripten::vecFromJSArray<TopoDS_Shape>(shapes);
+    NCollection_Map<TopoDS_Shape, TopTools_ShapeMapHasher> result;
+    for (auto& s : shapeVector) {
+        result.Add(s);
+    }
+    return result;
+}
+
+std::optional<gp_Pnt2d> pointToFaceUV(const TopoDS_Face& face, gp_Pnt pnt, double tolerance)
+{
+    gp_Pnt2d aPuv;
+    double aU1, aU2, aV1, aV2;
+    Extrema_ExtPS aExtrema;
+    BRepAdaptor_Surface aSurf(face, false);
+    BRepTools::UVBounds(face, aU1, aU2, aV1, aV2);
+    aExtrema.Initialize(aSurf, aU1, aU2, aV1, aV2, tolerance, tolerance);
+    aExtrema.Perform(pnt);
+    if (!aExtrema.IsDone()) {
+        return std::nullopt;
+    }
+    int aNbExt = aExtrema.NbExt();
+    if (!aNbExt) {
+        return std::nullopt;
+    }
+    double aMaxDist = RealLast(), aD;
+    int aIndice, i;
+    for (i = 1; i <= aNbExt; ++i) {
+        aD = aExtrema.SquareDistance(i);
+        if (aD < aMaxDist) {
+            aMaxDist = aD;
+            aIndice = i;
+        }
+    }
+    if (aIndice && aMaxDist <= tolerance) {
+        aExtrema.Point(aIndice).Parameter(aU1, aU2);
+        aPuv.SetCoord(aU1, aU2);
+        return aPuv;
+    }
+    return std::nullopt;
 }

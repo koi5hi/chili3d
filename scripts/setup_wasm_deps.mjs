@@ -1,9 +1,9 @@
 // Part of the Chili3d Project, under the AGPL-3.0 License.
 // See LICENSE file in the project root for full license information.
 
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { execAsync } from "./common.mjs";
 
 const CPP_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../cpp/");
@@ -19,7 +19,7 @@ const OCCT_DIR = path.resolve(BUILD_DIR, OCCT_DIR_NAME);
  * Due to a WebXR error, we need to use --skipLibCheck
  */
 async function fixEmscripten() {
-    let file = path.resolve(EMSDK_DIR, "upstream/emscripten/tools/emscripten.py");
+    const file = path.resolve(EMSDK_DIR, "upstream/emscripten/tools/emscripten.py");
     let contents = fs.readFileSync(file, "utf8");
     contents = contents.replace(
         `cmd = tsc + ['--outFile', tsc_output_file, '--declaration', '--emitDeclarationOnly', '--allowJs', js_doc_file]`,
@@ -34,7 +34,7 @@ const libs = [
     {
         name: "emscripten",
         url: "https://github.com/emscripten-core/emsdk.git",
-        tag: "4.0.8",
+        tag: "5.0.7",
         dir: EMSDK_DIR,
         actions: [fixEmscripten],
         commands: [
@@ -46,7 +46,7 @@ const libs = [
     {
         name: "occt",
         url: "https://github.com/Open-Cascade-SAS/OCCT.git",
-        tag: "V7_9_1",
+        tag: "V8_0_1",
         dir: OCCT_DIR,
         actions: [],
         commands: [],
@@ -86,7 +86,7 @@ function main() {
     }
 
     setupLibs()
-        .then((e) => {
+        .then((_e) => {
             console.log("Setup complete");
         })
         .catch((err) => {

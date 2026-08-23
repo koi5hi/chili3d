@@ -1,5 +1,5 @@
-// Part of the Chili3d Project, under the AGPL-3.0 License.
-// See LICENSE file in the project root for full license information.
+// Part of the Chili3d Project, under the LGPL-3.0 License.
+// See LICENSE-chili-wasm.text file in the project root for full license information.
 
 #include <emscripten/bind.h>
 #include <emscripten/val.h>
@@ -115,8 +115,8 @@ public:
         this->group.push_back(this->position.size() / 3 - start);
     }
 
-    void pointByFaceTriangulation(const Handle_Poly_PolygonOnTriangulation& polygon,
-        const Handle_Poly_Triangulation& triangulation, const gp_Trsf& transform)
+    void pointByFaceTriangulation(const Handle(Poly_PolygonOnTriangulation) & polygon,
+        const Handle(Poly_Triangulation) & triangulation, const gp_Trsf& transform)
     {
         std::optional<gp_Pnt> prePnt = std::nullopt;
         auto nodeIndex = polygon->Nodes();
@@ -219,18 +219,23 @@ class Mesher {
     double lineDeflection;
 
 public:
-    Mesher(const TopoDS_Shape& shape, double lineDeflection)
+    Mesher(const TopoDS_Shape& shape, double lineDeflection, bool useBoxRatio)
         : shape(shape)
     {
-        this->lineDeflection = boundingBoxRatio(shape, lineDeflection);
+        if (useBoxRatio) {
+            this->lineDeflection = boundingBoxRatio(shape, lineDeflection, false);
+        } else {
+            this->lineDeflection = lineDeflection;
+        }
+        BRepMesh_IncrementalMesh mesh(shape, lineDeflection, true, ANGLE_DEFLECTION, true);
     }
 
     NumberArray edgesMeshPosition()
     {
         std::vector<float> position;
-        TopTools_IndexedMapOfShape edgeMap;
+        NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> edgeMap;
         TopExp::MapShapes(shape, TopAbs_EDGE, edgeMap);
-        for (TopTools_IndexedMapOfShape::Iterator anIt(edgeMap); anIt.More(); anIt.Next()) {
+        for (NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher>::Iterator anIt(edgeMap); anIt.More(); anIt.Next()) {
             TopoDS_Edge edge = TopoDS::Edge(anIt.Value());
             pointByGCTangential(edge, this->lineDeflection, position);
         }
@@ -240,8 +245,6 @@ public:
 
     MeshData mesh()
     {
-        BRepMesh_IncrementalMesh mesh(shape, lineDeflection, true, ANGLE_DEFLECTION, true);
-
         std::unordered_map<TopoDS_Face, Handle(Poly_Triangulation)> facePolyMap;
         auto faceMeshData = meshFaces(facePolyMap);
         auto edgeMeshData = meshEdges(facePolyMap);
@@ -249,16 +252,16 @@ public:
         return MeshData { edgeMeshData, faceMeshData };
     }
 
-    EdgeMeshData meshEdges(std::unordered_map<TopoDS_Face, Handle_Poly_Triangulation>& facePolyMap)
+    EdgeMeshData meshEdges(std::unordered_map<TopoDS_Face, Handle(Poly_Triangulation)>& facePolyMap)
     {
         EdgeMesher mesher(lineDeflection);
-        TopTools_IndexedDataMapOfShapeListOfShape mapEF;
+        NCollection_IndexedDataMap<TopoDS_Shape, NCollection_List<TopoDS_Shape>, TopTools_ShapeMapHasher> mapEF;
         TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, mapEF);
         for (int ie = 1; ie <= mapEF.Extent(); ie++) {
             const TopoDS_Edge& aEdge = TopoDS::Edge(mapEF.FindKey(ie));
             mesher.edges.push_back(aEdge);
 
-            const TopTools_ListOfShape& aFaces = mapEF(ie);
+            const NCollection_List<TopoDS_Shape>& aFaces = mapEF(ie);
             if (aFaces.Extent() < 1) {
                 mesher.generateEdgeMesh(aEdge, nullptr);
             } else {
@@ -276,18 +279,18 @@ public:
             EdgeArray(val::array(mesher.edges)) };
     }
 
-    FaceMeshData meshFaces(std::unordered_map<TopoDS_Face, Handle_Poly_Triangulation>& facePolyMap)
+    FaceMeshData meshFaces(std::unordered_map<TopoDS_Face, Handle(Poly_Triangulation)>& facePolyMap)
     {
         FaceMesher mesher;
-        TopTools_IndexedMapOfShape faceMap;
+        NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> faceMap;
         TopExp::MapShapes(shape, TopAbs_FACE, faceMap);
-        for (TopTools_IndexedMapOfShape::Iterator anIt(faceMap); anIt.More(); anIt.Next()) {
+        for (NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher>::Iterator anIt(faceMap); anIt.More(); anIt.Next()) {
             auto face = TopoDS::Face(anIt.Value());
-            mesher.faces.push_back(face);
             TopLoc_Location location;
             auto handlePoly = BRep_Tool::Triangulation(face, location);
             if (!handlePoly.IsNull()) {
                 auto trsf = location.Transformation();
+                mesher.faces.push_back(face);
                 mesher.generateFaceMesh(face, handlePoly, trsf);
                 facePolyMap[face] = handlePoly;
             }
@@ -297,17 +300,12 @@ public:
             NumberArray(val::array(mesher.uv)), NumberArray(val::array(mesher.index)),
             NumberArray(val::array(mesher.group)), FaceArray(val::array(mesher.faces)) };
     }
-
-    ~Mesher()
-    {
-        BRepTools::Clean(shape, true);
-    }
 };
 
 EMSCRIPTEN_BINDINGS(Mesher)
 {
     class_<Mesher>("Mesher")
-        .constructor<TopoDS_Shape, double>()
+        .constructor<TopoDS_Shape, double, bool>()
         .function("mesh", &Mesher::mesh)
         .function("edgesMeshPosition", &Mesher::edgesMeshPosition);
 

@@ -1,5 +1,5 @@
-// Part of the Chili3d Project, under the AGPL-3.0 License.
-// See LICENSE file in the project root for full license information.
+// Part of the Chili3d Project, under the LGPL-3.0 License.
+// See LICENSE-chili-wasm.text file in the project root for full license information.
 
 #include "shared.hpp"
 
@@ -9,6 +9,8 @@ using namespace emscripten;
 
 EMSCRIPTEN_BINDINGS(Shared)
 {
+    register_vector<TopoDS_Shape>("ShapeVector");
+
     register_type<Int8Array>("Int8Array");
     register_type<Int16Array>("Int16Array");
     register_type<Int32Array>("Int32Array");
@@ -33,17 +35,20 @@ EMSCRIPTEN_BINDINGS(Shared)
 
     register_optional<double>();
     register_optional<UV>();
+    register_optional<Vector3>();
     register_optional<PointAndParameter>();
     register_optional<ProjectPointResult>();
     register_optional<std::string>();
 
     value_object<Domain>("Domain").field("start", &Domain::start).field("end", &Domain::end);
-    ;
-
     value_object<UV>("UV").field("u", &UV::u).field("v", &UV::v);
-    ;
-
     value_object<Vector3>("Vector3").field("x", &Vector3::x).field("y", &Vector3::y).field("z", &Vector3::z);
+    value_object<BoundingBox>("BoundingBox")
+        .field("min", &BoundingBox::min)
+        .field("max", &BoundingBox::max);
+    value_object<OrientedBoundingBox>("OrientedBoundingBox")
+        .field("center", &OrientedBoundingBox::center)
+        .field("size", &OrientedBoundingBox::size);
 
     value_object<PointAndParameter>("PointAndParameter")
         .field("point", &PointAndParameter::point)
@@ -80,4 +85,12 @@ EMSCRIPTEN_BINDINGS(Shared)
         .field("isParallel", &ExtremaCCResult::isParallel)
         .field("u1", &ExtremaCCResult::u1)
         .field("u2", &ExtremaCCResult::u2);
+
+    value_object<FaceCheckResult>("FaceCheckResult")
+        .field("index", &FaceCheckResult::index)
+        .field("isValid", &FaceCheckResult::isValid)
+        .field("status", &FaceCheckResult::status);
+
+    register_vector<FaceCheckResult>("FaceCheckResultVector");
+    
 }
